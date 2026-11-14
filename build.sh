@@ -15,10 +15,10 @@ x86_64-w64-mingw32-g++ -std=c++17 -O2 -s -Wall -Wextra -Wno-unused-parameter -Wn
   -DUNICODE -D_UNICODE -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 \
   -finput-charset=UTF-8 -fwide-exec-charset=UTF-16LE \
   -static-libgcc -static-libstdc++ \
-  src/main.cpp src/settings.cpp src/timezone.cpp src/render.cpp \
+  src/main.cpp src/settings.cpp src/timezone.cpp src/render.cpp src/weather.cpp src/pomodoro.cpp \
   build/app.res \
   -ld2d1 -ldwrite -lwindowscodecs -lgdi32 -luser32 -lshell32 -lshlwapi \
-  -ladvapi32 -lole32 -loleaut32 -lcomctl32 -luuid \
+  -ladvapi32 -lole32 -loleaut32 -lcomctl32 -luuid -lwinhttp -lwinmm \
   -o build/DualZoneClock.exe
 
 echo "Built build/DualZoneClock.exe"

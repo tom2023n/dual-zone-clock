@@ -288,6 +288,24 @@ bool Apply(const Value& root, Settings& s) {
     if (const Value* v = root.field("startWithWindows")) {
         if (v->type == Value::BOOL) s.startWithWindows = v->b;
     }
+    if (const Value* v = root.field("showWeather")) {
+        if (v->type == Value::BOOL) s.showWeather = v->b;
+    }
+    if (const Value* v = root.field("fahrenheit")) {
+        if (v->type == Value::BOOL) s.fahrenheit = v->b;
+    }
+    if (const Value* v = root.field("focusMin")) {
+        if (v->type == Value::NUM) s.focusMin = ClampInt((int)std::lround(v->num), 1, 180);
+    }
+    if (const Value* v = root.field("shortBreakMin")) {
+        if (v->type == Value::NUM) s.shortBreakMin = ClampInt((int)std::lround(v->num), 1, 90);
+    }
+    if (const Value* v = root.field("longBreakMin")) {
+        if (v->type == Value::NUM) s.longBreakMin = ClampInt((int)std::lround(v->num), 1, 90);
+    }
+    if (const Value* v = root.field("roundsBeforeLong")) {
+        if (v->type == Value::NUM) s.roundsBeforeLong = ClampInt((int)std::lround(v->num), 1, 12);
+    }
     bool sawX = false, sawY = false;
     if (const Value* v = root.field("x")) {
         if (v->type == Value::NUM) {
@@ -322,6 +340,19 @@ bool Apply(const Value& root, Settings& s) {
                         Trim(w);
                         if (!w.empty() && w.size() < 128) s.clock[i].timeZone = std::move(w);
                     }
+                }
+                if (const Value* lat = c.field("latitude")) {
+                    if (lat->type == Value::NUM && lat->num >= -90 && lat->num <= 90) s.clock[i].latitude = lat->num;
+                }
+                if (const Value* lon = c.field("longitude")) {
+                    if (lon->type == Value::NUM && lon->num >= -180 && lon->num <= 180) s.clock[i].longitude = lon->num;
+                }
+                const Value* temp = c.field("lastTempC");
+                const Value* wcode = c.field("lastCode");
+                if (temp && wcode && temp->type == Value::NUM && wcode->type == Value::NUM) {
+                    s.clock[i].hasWeather = true;
+                    s.clock[i].lastTempC = temp->num;
+                    s.clock[i].lastCode = (int)std::lround(wcode->num);
                 }
             }
         }
@@ -382,15 +413,33 @@ bool WriteAtomic(const std::wstring& path, const std::string& data) {
 
 Settings DefaultSettings() {
     Settings s;
-    s.clock[0] = {L"都柏林", L"GMT Standard Time"};
-    s.clock[1] = {L"北京", L"China Standard Time"};
+    s.clock[0].label = L"都柏林";
+    s.clock[0].timeZone = L"GMT Standard Time";
+    s.clock[0].latitude = 53.35;
+    s.clock[0].longitude = -6.26;
+    s.clock[1].label = L"北京";
+    s.clock[1].timeZone = L"China Standard Time";
+    s.clock[1].latitude = 39.90;
+    s.clock[1].longitude = 116.40;
     s.opacity = 85;
     s.scale = 100;
     s.showSeconds = true;
     s.alwaysOnTop = false;
     s.startWithWindows = false;
+    s.showWeather = true;
+    s.fahrenheit = false;
+    s.focusMin = 25;
+    s.shortBreakMin = 5;
+    s.longBreakMin = 15;
+    s.roundsBeforeLong = 4;
     s.hasPosition = false;
     return s;
+}
+
+std::string FormatNum(double v, int prec) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.*f", prec, v);
+    return buf;
 }
 
 std::string SettingsToJson(const Settings& s) {
@@ -401,6 +450,12 @@ std::string SettingsToJson(const Settings& s) {
     o += "  \"scale\": " + std::to_string(s.scale) + ",\n";
     o += std::string("  \"showSeconds\": ") + (s.showSeconds ? "true" : "false") + ",\n";
     o += std::string("  \"startWithWindows\": ") + (s.startWithWindows ? "true" : "false") + ",\n";
+    o += std::string("  \"showWeather\": ") + (s.showWeather ? "true" : "false") + ",\n";
+    o += std::string("  \"fahrenheit\": ") + (s.fahrenheit ? "true" : "false") + ",\n";
+    o += "  \"focusMin\": " + std::to_string(s.focusMin) + ",\n";
+    o += "  \"shortBreakMin\": " + std::to_string(s.shortBreakMin) + ",\n";
+    o += "  \"longBreakMin\": " + std::to_string(s.longBreakMin) + ",\n";
+    o += "  \"roundsBeforeLong\": " + std::to_string(s.roundsBeforeLong) + ",\n";
     if (s.hasPosition) {
         o += "  \"x\": " + std::to_string(s.x) + ",\n";
         o += "  \"y\": " + std::to_string(s.y) + ",\n";
@@ -411,6 +466,12 @@ std::string SettingsToJson(const Settings& s) {
         AppendJsonString(o, WideToUtf8(s.clock[i].label));
         o += ", \"timeZone\": ";
         AppendJsonString(o, WideToUtf8(s.clock[i].timeZone));
+        o += ", \"latitude\": " + FormatNum(s.clock[i].latitude, 4);
+        o += ", \"longitude\": " + FormatNum(s.clock[i].longitude, 4);
+        if (s.clock[i].hasWeather) {
+            o += ", \"lastTempC\": " + FormatNum(s.clock[i].lastTempC, 1);
+            o += ", \"lastCode\": " + std::to_string(s.clock[i].lastCode);
+        }
         o += "}";
         if (i == 0) o += ",";
         o += "\n";

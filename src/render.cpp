@@ -8,6 +8,7 @@
 #include <dwrite_3.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -54,6 +55,11 @@ struct Geom {
     float colonW = 8.f;
     float timeBlockW = 80.f;
     float labelTextW[2] = {};
+    float weatherTextW[2] = {};
+    bool showWeather = false;
+    bool hasStrip = false;
+    float stripH = 0;
+    float stripOffset = 0;
     int winW = 0;
     int winH = 0;
     int digits = 6;
@@ -152,6 +158,7 @@ bool ComputeGeom(RendererImpl& impl, const Frame& frame, Geom& g) {
     }
     g.timeBlockW = g.digitW * (float)g.digits + g.colonW * (float)g.colons;
 
+    g.showWeather = frame.showWeather;
     float colNeed = g.timeBlockW;
     for (int i = 0; i < 2; ++i) {
         float w = 0, h = 0;
@@ -159,26 +166,97 @@ bool ComputeGeom(RendererImpl& impl, const Frame& frame, Geom& g) {
         if (!MeasureString(impl.dw.get(), labelFmt.get(), label, w, h)) return false;
         g.labelTextW[i] = w;
         labelH = std::max(labelH, h);
+        g.weatherTextW[i] = 0;
+        if (frame.showWeather) {
+            std::wstring sample = frame.weatherText[i].empty() ? L"--" : frame.weatherText[i];
+            std::wstring wide = L"-88°C";
+            float tw = 0, th = 0, ww = 0, wh = 0;
+            if (!MeasureString(impl.dw.get(), labelFmt.get(), sample, tw, th)) return false;
+            if (!MeasureString(impl.dw.get(), labelFmt.get(), wide, ww, wh)) return false;
+            g.weatherTextW[i] = std::max(tw, ww);
+            labelH = std::max(labelH, th);
+        }
         std::wstring date = WidestDigits(frame.date[i].empty() ? L"8888年88月88日 周三 · UTC+8" : frame.date[i]);
         float dw = 0, dh = 0;
         if (!MeasureString(impl.dw.get(), dateFmt.get(), date, dw, dh)) return false;
         float aw = 0, ah = 0;
         if (!MeasureString(impl.dw.get(), dateFmt.get(), frame.date[i].empty() ? date : frame.date[i], aw, ah)) return false;
         dateH = std::max(dateH, std::max(dh, ah));
-        float need = std::max(g.dot + g.dotGap + w, std::max(g.timeBlockW, std::max(dw, aw)));
+        float weatherExtra = 0;
+        if (frame.showWeather) weatherExtra = 5.f * s + 14.f * s + 4.f * s + g.weatherTextW[i];
+        float need = std::max(g.dot + g.dotGap + w + weatherExtra, std::max(g.timeBlockW, std::max(dw, aw)));
         colNeed = std::max(colNeed, need);
     }
     g.labelH = labelH + 3.f * s;
     g.timeH = timeH + 2.f * s;
     g.dateH = dateH + 3.f * s;
     g.colW = colNeed;
+    g.hasStrip = frame.showTimer && !frame.timerText.empty();
+    g.stripH = g.hasStrip ? 24.f * s : 0;
+    float stripGap = g.hasStrip ? 8.f * s : 0;
     g.cardW = g.padX * 2.f + g.colW * 2.f + g.colGap;
-    g.cardH = g.padY * 2.f + g.labelH + g.gap1 + g.timeH + g.gap2 + g.dateH;
+    g.cardH = g.padY * 2.f + g.labelH + g.gap1 + g.timeH + g.gap2 + g.dateH + stripGap + g.stripH;
+    g.stripOffset = g.cardH - g.padY - g.stripH;
     g.winW = (int)std::ceil(g.cardW + g.shadow * 2.f);
     g.winH = (int)std::ceil(g.cardH + g.shadow * 2.f);
     if (g.winW < 32) g.winW = 32;
     if (g.winH < 32) g.winH = 32;
     return true;
+}
+
+void DrawWeatherIcon(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* brush, int code, float cx, float cy, float d) {
+    if (code < 0 || d < 2.f) return;
+    auto cloud = [&](float x, float y, float s, float alpha) {
+        brush->SetColor(D2D1::ColorF(0.86f, 0.89f, 0.94f, alpha));
+        rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x - s * 0.22f, y + s * 0.08f), s * 0.34f, s * 0.24f), brush);
+        rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + s * 0.22f, y + s * 0.1f), s * 0.28f, s * 0.2f), brush);
+        rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y - s * 0.12f), s * 0.24f, s * 0.22f), brush);
+    };
+    auto sun = [&](float x, float y, float r) {
+        brush->SetColor(D2D1::ColorF(1.f, 0.82f, 0.38f, 1.f));
+        rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), r, r), brush);
+        brush->SetColor(D2D1::ColorF(1.f, 0.86f, 0.45f, 0.9f));
+        for (int i = 0; i < 4; ++i) {
+            float a = (float)i * 0.785398f;
+            float dx = std::cos(a);
+            float dy = std::sin(a);
+            rt->DrawLine(D2D1::Point2F(x + dx * r * 1.45f, y + dy * r * 1.45f), D2D1::Point2F(x + dx * r * 2.15f, y + dy * r * 2.15f), brush, std::max(1.f, r * 0.28f));
+        }
+    };
+    bool snow = code == 71 || code == 73 || code == 75 || code == 77 || code == 85 || code == 86;
+    bool rain = (code >= 51 && code <= 67) || (code >= 80 && code <= 82);
+    bool storm = code == 95 || code == 96 || code == 99;
+    bool fog = code == 45 || code == 48;
+    if (code <= 1) {
+        sun(cx, cy, d * 0.22f);
+    } else if (code == 2) {
+        sun(cx - d * 0.12f, cy - d * 0.08f, d * 0.16f);
+        cloud(cx + d * 0.08f, cy + d * 0.08f, d * 0.7f, 1.f);
+    } else if (fog) {
+        brush->SetColor(D2D1::ColorF(0.78f, 0.82f, 0.88f, 0.9f));
+        for (int i = 0; i < 3; ++i) {
+            float y = cy - d * 0.28f + i * d * 0.28f;
+            rt->DrawLine(D2D1::Point2F(cx - d * 0.42f, y), D2D1::Point2F(cx + d * 0.42f, y), brush, std::max(1.2f, d * 0.12f));
+        }
+    } else {
+        cloud(cx, cy - (rain || snow || storm ? d * 0.12f : 0), d, 1.f);
+        if (rain || storm) {
+            brush->SetColor(D2D1::ColorF(0.55f, 0.75f, 1.f, 0.95f));
+            rt->DrawLine(D2D1::Point2F(cx - d * 0.18f, cy + d * 0.22f), D2D1::Point2F(cx - d * 0.28f, cy + d * 0.48f), brush, std::max(1.f, d * 0.1f));
+            rt->DrawLine(D2D1::Point2F(cx + d * 0.12f, cy + d * 0.22f), D2D1::Point2F(cx + d * 0.02f, cy + d * 0.48f), brush, std::max(1.f, d * 0.1f));
+        }
+        if (snow) {
+            brush->SetColor(D2D1::ColorF(0.9f, 0.95f, 1.f, 1.f));
+            rt->DrawLine(D2D1::Point2F(cx, cy + d * 0.12f), D2D1::Point2F(cx, cy + d * 0.48f), brush, std::max(1.f, d * 0.08f));
+            rt->DrawLine(D2D1::Point2F(cx - d * 0.16f, cy + d * 0.3f), D2D1::Point2F(cx + d * 0.16f, cy + d * 0.3f), brush, std::max(1.f, d * 0.08f));
+        }
+        if (storm) {
+            brush->SetColor(D2D1::ColorF(1.f, 0.86f, 0.35f, 1.f));
+            rt->DrawLine(D2D1::Point2F(cx + d * 0.08f, cy + d * 0.05f), D2D1::Point2F(cx - d * 0.02f, cy + d * 0.28f), brush, std::max(1.2f, d * 0.12f));
+            rt->DrawLine(D2D1::Point2F(cx - d * 0.02f, cy + d * 0.28f), D2D1::Point2F(cx + d * 0.16f, cy + d * 0.28f), brush, std::max(1.2f, d * 0.12f));
+            rt->DrawLine(D2D1::Point2F(cx + d * 0.16f, cy + d * 0.28f), D2D1::Point2F(cx + d * 0.02f, cy + d * 0.5f), brush, std::max(1.2f, d * 0.12f));
+        }
+    }
 }
 
 void DrawShadowed(ID2D1RenderTarget* rt, IDWriteTextLayout* layout, float x, float y, ID2D1SolidColorBrush* brush, D2D1_COLOR_F color) {
@@ -261,8 +339,9 @@ bool Paint(RendererImpl& impl, const Frame& frame, const Geom& g) {
     rt->DrawRoundedRectangle(D2D1::RoundedRect(inner, std::max(1.f, g.radius - stroke), std::max(1.f, g.radius - stroke)), brush.get(), stroke);
 
     float dx = std::floor(card.left + g.padX + g.colW + g.colGap * 0.5f) + 0.5f;
+    float dividerBottom = g.hasStrip ? card.top + g.stripOffset - 6.f * s : card.bottom - g.padY - 2.f * s;
     brush->SetColor(D2D1::ColorF(1, 1, 1, 0.14f));
-    rt->DrawLine(D2D1::Point2F(dx, card.top + g.padY + 2.f * s), D2D1::Point2F(dx, card.bottom - g.padY - 2.f * s), brush.get(), std::max(1.f, s * 0.8f));
+    rt->DrawLine(D2D1::Point2F(dx, card.top + g.padY + 2.f * s), D2D1::Point2F(dx, dividerBottom), brush.get(), std::max(1.f, s * 0.8f));
 
     ComPtr<IDWriteTextFormat> labelFmt, timeFmt, dateFmt;
     if (!MakeFormat(impl, 13.f * s, DWRITE_TEXT_ALIGNMENT_LEADING, labelFmt) ||
@@ -286,15 +365,25 @@ bool Paint(RendererImpl& impl, const Frame& frame, const Geom& g) {
 
     for (int i = 0; i < 2; ++i) {
         std::wstring label = frame.label[i].empty() ? L" " : frame.label[i];
-        float group = g.dot + g.dotGap + g.labelTextW[i];
+        float weatherExtra = 0;
+        if (g.showWeather) weatherExtra = 5.f * s + 14.f * s + 4.f * s + g.weatherTextW[i];
+        float group = g.dot + g.dotGap + g.labelTextW[i] + weatherExtra;
         float x = colX[i] + (g.colW - group) * 0.5f;
         brush->SetColor(labelColor[i]);
         float cy = labelY + g.labelH * 0.5f;
         rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + g.dot * 0.5f, cy), g.dot * 0.5f, g.dot * 0.5f), brush.get());
-
         ComPtr<IDWriteTextLayout> labelLayout;
         impl.dw->CreateTextLayout(label.c_str(), (UINT32)label.size(), labelFmt.get(), std::max(1.f, g.labelTextW[i] + 2.f), g.labelH, labelLayout.put());
         if (labelLayout) DrawShadowed(rt, labelLayout.get(), x + g.dot + g.dotGap, labelY, brush.get(), labelColor[i]);
+        if (g.showWeather) {
+            float ix = x + g.dot + g.dotGap + g.labelTextW[i] + 6.f * s;
+            float iy = labelY + g.labelH * 0.5f;
+            DrawWeatherIcon(rt, brush.get(), frame.weatherCode[i], ix + 7.f * s, iy, 13.f * s);
+            std::wstring wt = frame.weatherText[i].empty() ? L"--" : frame.weatherText[i];
+            ComPtr<IDWriteTextLayout> weatherLayout;
+            impl.dw->CreateTextLayout(wt.c_str(), (UINT32)wt.size(), labelFmt.get(), std::max(1.f, g.weatherTextW[i] + 2.f), g.labelH, weatherLayout.put());
+            if (weatherLayout) DrawShadowed(rt, weatherLayout.get(), ix + 14.f * s + 3.f * s, labelY, brush.get(), dateColor);
+        }
 
         std::wstring time = frame.time[i].empty() ? L"--:--" : frame.time[i];
         int digits = 0, colons = 0;
@@ -317,6 +406,21 @@ bool Paint(RendererImpl& impl, const Frame& frame, const Geom& g) {
         ComPtr<IDWriteTextLayout> dateLayout;
         impl.dw->CreateTextLayout(date.c_str(), (UINT32)date.size(), dateFmt.get(), g.colW, g.dateH, dateLayout.put());
         if (dateLayout) DrawShadowed(rt, dateLayout.get(), colX[i], dateY, brush.get(), dateColor);
+    }
+
+    if (g.hasStrip) {
+        float stripTop = card.top + g.stripOffset;
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.12f));
+        rt->DrawLine(D2D1::Point2F(card.left + g.padX, stripTop - 4.f * s), D2D1::Point2F(card.right - g.padX, stripTop - 4.f * s), brush.get(), std::max(1.f, s * 0.7f));
+        D2D1_COLOR_F timerColor = D2D1::ColorF(1.f, 0.78f, 0.42f, 1.f);
+        if (frame.timerStyle == 1) timerColor = D2D1::ColorF(0.55f, 0.86f, 0.72f, 1.f);
+        if (frame.timerStyle == 2) timerColor = D2D1::ColorF(0.62f, 0.78f, 1.f, 1.f);
+        ComPtr<IDWriteTextFormat> timerFmt;
+        if (MakeFormat(impl, 13.f * s, DWRITE_TEXT_ALIGNMENT_CENTER, timerFmt)) {
+            ComPtr<IDWriteTextLayout> timerLayout;
+            impl.dw->CreateTextLayout(frame.timerText.c_str(), (UINT32)frame.timerText.size(), timerFmt.get(), g.cardW - g.padX * 2.f, g.stripH, timerLayout.put());
+            if (timerLayout) DrawShadowed(rt, timerLayout.get(), card.left + g.padX, stripTop, brush.get(), timerColor);
+        }
     }
 
     hr = rt->EndDraw();
@@ -520,12 +624,24 @@ bool Renderer::Measure(const Frame& frame, int& w, int& h) {
     return true;
 }
 
-bool Renderer::Draw(HWND hwnd, int x, int y, const Frame& frame) {
+bool Renderer::Draw(HWND hwnd, int x, int y, const Frame& frame, WidgetHits* hits) {
     if (!impl_ || !hwnd) return false;
     Geom g;
     if (!ComputeGeom(*impl_, frame, g)) return false;
+    if (hits) {
+        hits->hasStrip = false;
+        hits->strip = RECT{};
+        if (g.hasStrip) {
+            float left = g.shadow;
+            float top = g.shadow + g.stripOffset;
+            hits->hasStrip = true;
+            hits->strip.left = (LONG)std::floor(left);
+            hits->strip.top = (LONG)std::floor(top);
+            hits->strip.right = (LONG)std::ceil(left + g.cardW);
+            hits->strip.bottom = (LONG)std::ceil(g.shadow + g.cardH);
+        }
+    }
     if (!Paint(*impl_, frame, g)) {
-        // One retry if the WIC target was dropped.
         if (!Paint(*impl_, frame, g)) return false;
     }
     return Present(*impl_, hwnd, x, y, g);
