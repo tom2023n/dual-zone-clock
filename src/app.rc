@@ -18,10 +18,11 @@ BEGIN
     BEGIN
         BLOCK "040904B0"
         BEGIN
-            VALUE "CompanyName", "DualZoneClock"
+            VALUE "CompanyName", "tom2023n"
             VALUE "FileDescription", "Dual Zone Desktop Clock"
             VALUE "FileVersion", "1.0.0"
             VALUE "InternalName", "DualZoneClock"
+            VALUE "LegalCopyright", "Copyright (c) 2026 tom2023n"
             VALUE "OriginalFilename", "DualZoneClock.exe"
             VALUE "ProductName", "Dual Zone Clock"
             VALUE "ProductVersion", "1.0.0"
