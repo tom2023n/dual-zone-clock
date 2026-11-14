@@ -1,0 +1,446 @@
+#include "settings.hpp"
+
+#include <shlobj.h>
+
+#include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+
+namespace {
+
+struct Value {
+    enum Type { NUL, BOOL, NUM, STR, ARR, OBJ } type = NUL;
+    bool b = false;
+    double num = 0;
+    std::string str;
+    std::vector<Value> arr;
+    std::vector<std::pair<std::string, Value>> obj;
+
+    const Value* field(const char* key) const {
+        if (type != OBJ) return nullptr;
+        for (const auto& kv : obj) {
+            if (kv.first == key) return &kv.second;
+        }
+        return nullptr;
+    }
+};
+
+class Parser {
+public:
+    explicit Parser(const std::string& s) : s_(s) {}
+
+    bool Parse(Value& out) {
+        if (!ParseValue(out)) return false;
+        Skip();
+        return i_ == s_.size();
+    }
+
+private:
+    const std::string& s_;
+    size_t i_ = 0;
+
+    void Skip() {
+        while (i_ < s_.size() && std::isspace(static_cast<unsigned char>(s_[i_]))) ++i_;
+    }
+
+    bool Consume(char c) {
+        Skip();
+        if (i_ < s_.size() && s_[i_] == c) {
+            ++i_;
+            return true;
+        }
+        return false;
+    }
+
+    static int Hex(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    }
+
+    static int Hex4(const std::string& s, size_t i) {
+        int v = 0;
+        for (int k = 0; k < 4; ++k) {
+            int h = Hex(s[i + k]);
+            if (h < 0) return -1;
+            v = (v << 4) | h;
+        }
+        return v;
+    }
+
+    static void AppendUtf8(std::string& out, int cp) {
+        if (cp < 0 || cp > 0x10FFFF) cp = 0xFFFD;
+        if (cp < 0x80) {
+            out.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else if (cp < 0x10000) {
+            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+    }
+
+    bool ParseString(std::string& out) {
+        if (!Consume('"')) return false;
+        out.clear();
+        while (i_ < s_.size()) {
+            unsigned char c = static_cast<unsigned char>(s_[i_++]);
+            if (c == '"') return true;
+            if (c == '\\') {
+                if (i_ >= s_.size()) return false;
+                char e = s_[i_++];
+                switch (e) {
+                case '"':
+                case '\\':
+                case '/': out.push_back(e); break;
+                case 'b': out.push_back('\b'); break;
+                case 'f': out.push_back('\f'); break;
+                case 'n': out.push_back('\n'); break;
+                case 'r': out.push_back('\r'); break;
+                case 't': out.push_back('\t'); break;
+                case 'u': {
+                    if (i_ + 4 > s_.size()) return false;
+                    int cp = Hex4(s_, i_);
+                    if (cp < 0) return false;
+                    i_ += 4;
+                    if (cp >= 0xD800 && cp <= 0xDBFF && i_ + 6 <= s_.size() && s_[i_] == '\\' && s_[i_ + 1] == 'u') {
+                        int lo = Hex4(s_, i_ + 2);
+                        if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                            i_ += 6;
+                        }
+                    }
+                    AppendUtf8(out, cp);
+                    break;
+                }
+                default: return false;
+                }
+            } else if (c < 0x20) {
+                return false;
+            } else {
+                out.push_back(static_cast<char>(c));
+            }
+        }
+        return false;
+    }
+
+    bool ParseNumber(double& out) {
+        size_t start = i_;
+        if (i_ < s_.size() && (s_[i_] == '-' || s_[i_] == '+')) ++i_;
+        if (i_ >= s_.size() || !std::isdigit(static_cast<unsigned char>(s_[i_]))) return false;
+        while (i_ < s_.size() && std::isdigit(static_cast<unsigned char>(s_[i_]))) ++i_;
+        if (i_ < s_.size() && s_[i_] == '.') {
+            ++i_;
+            while (i_ < s_.size() && std::isdigit(static_cast<unsigned char>(s_[i_]))) ++i_;
+        }
+        if (i_ < s_.size() && (s_[i_] == 'e' || s_[i_] == 'E')) {
+            ++i_;
+            if (i_ < s_.size() && (s_[i_] == '-' || s_[i_] == '+')) ++i_;
+            while (i_ < s_.size() && std::isdigit(static_cast<unsigned char>(s_[i_]))) ++i_;
+        }
+        char* end = nullptr;
+        out = std::strtod(s_.c_str() + start, &end);
+        if (end != s_.c_str() + i_) return false;
+        return true;
+    }
+
+    bool ParseValue(Value& out);
+    bool ParseObject(Value& out);
+    bool ParseArray(Value& out);
+};
+
+bool Parser::ParseObject(Value& out) {
+    if (!Consume('{')) return false;
+    out.type = Value::OBJ;
+    out.obj.clear();
+    if (Consume('}')) return true;
+    while (true) {
+        std::string key;
+        if (!ParseString(key)) return false;
+        if (!Consume(':')) return false;
+        Value v;
+        if (!ParseValue(v)) return false;
+        out.obj.emplace_back(std::move(key), std::move(v));
+        if (Consume('}')) return true;
+        if (!Consume(',')) return false;
+    }
+}
+
+bool Parser::ParseArray(Value& out) {
+    if (!Consume('[')) return false;
+    out.type = Value::ARR;
+    out.arr.clear();
+    if (Consume(']')) return true;
+    while (true) {
+        Value v;
+        if (!ParseValue(v)) return false;
+        out.arr.push_back(std::move(v));
+        if (Consume(']')) return true;
+        if (!Consume(',')) return false;
+    }
+}
+
+bool Parser::ParseValue(Value& out) {
+    Skip();
+    if (i_ >= s_.size()) return false;
+    char c = s_[i_];
+    if (c == '"') {
+        out.type = Value::STR;
+        return ParseString(out.str);
+    }
+    if (c == '{') return ParseObject(out);
+    if (c == '[') return ParseArray(out);
+    if (c == 't' && s_.compare(i_, 4, "true") == 0) {
+        i_ += 4;
+        out.type = Value::BOOL;
+        out.b = true;
+        return true;
+    }
+    if (c == 'f' && s_.compare(i_, 5, "false") == 0) {
+        i_ += 5;
+        out.type = Value::BOOL;
+        out.b = false;
+        return true;
+    }
+    if (c == 'n' && s_.compare(i_, 4, "null") == 0) {
+        i_ += 4;
+        out.type = Value::NUL;
+        return true;
+    }
+    if (c == '-' || c == '+' || std::isdigit(static_cast<unsigned char>(c))) {
+        out.type = Value::NUM;
+        return ParseNumber(out.num);
+    }
+    return false;
+}
+
+void AppendJsonString(std::string& out, const std::string& utf8) {
+    out.push_back('"');
+    for (unsigned char c : utf8) {
+        switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (c < 0x20) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                out += buf;
+            } else {
+                out.push_back(static_cast<char>(c));
+            }
+        }
+    }
+    out.push_back('"');
+}
+
+int SnapOpacity(int v) {
+    const int opts[] = {40, 55, 70, 85, 100};
+    int best = 85;
+    int bestD = 1000;
+    for (int o : opts) {
+        int d = std::abs(v - o);
+        if (d < bestD) {
+            bestD = d;
+            best = o;
+        }
+    }
+    return best;
+}
+
+bool Apply(const Value& root, Settings& s) {
+    if (root.type != Value::OBJ) return false;
+    if (const Value* v = root.field("alwaysOnTop")) {
+        if (v->type == Value::BOOL) s.alwaysOnTop = v->b;
+    }
+    if (const Value* v = root.field("opacity")) {
+        if (v->type == Value::NUM) s.opacity = SnapOpacity((int)std::lround(v->num));
+    }
+    if (const Value* v = root.field("size")) {
+        if (v->type == Value::NUM) {
+            int n = (int)std::lround(v->num);
+            if (n < 0) n = 0;
+            if (n > 2) n = 2;
+            s.size = n;
+        }
+    }
+    if (const Value* v = root.field("showSeconds")) {
+        if (v->type == Value::BOOL) s.showSeconds = v->b;
+    }
+    if (const Value* v = root.field("startWithWindows")) {
+        if (v->type == Value::BOOL) s.startWithWindows = v->b;
+    }
+    bool sawX = false, sawY = false;
+    if (const Value* v = root.field("x")) {
+        if (v->type == Value::NUM) {
+            s.x = (int)std::lround(v->num);
+            sawX = true;
+        }
+    }
+    if (const Value* v = root.field("y")) {
+        if (v->type == Value::NUM) {
+            s.y = (int)std::lround(v->num);
+            sawY = true;
+        }
+    }
+    s.hasPosition = sawX && sawY;
+    if (const Value* clocks = root.field("clocks")) {
+        if (clocks->type == Value::ARR) {
+            for (int i = 0; i < 2 && i < (int)clocks->arr.size(); ++i) {
+                const Value& c = clocks->arr[i];
+                if (const Value* lab = c.field("label")) {
+                    if (lab->type == Value::STR) {
+                        std::wstring w = Utf8ToWide(lab->str);
+                        Trim(w);
+                        if (!w.empty()) {
+                            if (w.size() > 24) w.resize(24);
+                            s.clock[i].label = std::move(w);
+                        }
+                    }
+                }
+                if (const Value* tz = c.field("timeZone")) {
+                    if (tz->type == Value::STR) {
+                        std::wstring w = Utf8ToWide(tz->str);
+                        Trim(w);
+                        if (!w.empty() && w.size() < 128) s.clock[i].timeZone = std::move(w);
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+std::wstring ExeDir() {
+    wchar_t buf[1024];
+    DWORD n = GetModuleFileNameW(nullptr, buf, 1024);
+    if (n == 0 || n >= 1024) return L".";
+    std::wstring p(buf, n);
+    size_t slash = p.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return L".";
+    return p.substr(0, slash);
+}
+
+bool ReadFileUtf8(const std::wstring& path, std::string& out) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(h, &size) || size.QuadPart < 0 || size.QuadPart > 1024 * 1024) {
+        CloseHandle(h);
+        return false;
+    }
+    out.assign(static_cast<size_t>(size.QuadPart), '\0');
+    DWORD got = 0;
+    BOOL ok = TRUE;
+    if (size.QuadPart > 0) ok = ReadFile(h, out.data(), (DWORD)size.QuadPart, &got, nullptr);
+    CloseHandle(h);
+    if (!ok || got != size.QuadPart) return false;
+    out.resize(got);
+    if (out.size() >= 3 && (unsigned char)out[0] == 0xEF && (unsigned char)out[1] == 0xBB && (unsigned char)out[2] == 0xBF) {
+        out.erase(0, 3);
+    }
+    return true;
+}
+
+bool WriteAtomic(const std::wstring& path, const std::string& data) {
+    std::wstring tmp = path + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD wrote = 0;
+    BOOL ok = WriteFile(h, data.data(), (DWORD)data.size(), &wrote, nullptr);
+    CloseHandle(h);
+    if (!ok || wrote != data.size()) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+Settings DefaultSettings() {
+    Settings s;
+    s.clock[0] = {L"都柏林", L"GMT Standard Time"};
+    s.clock[1] = {L"北京", L"China Standard Time"};
+    s.opacity = 85;
+    s.size = 1;
+    s.showSeconds = true;
+    s.alwaysOnTop = false;
+    s.startWithWindows = false;
+    s.hasPosition = false;
+    return s;
+}
+
+std::string SettingsToJson(const Settings& s) {
+    std::string o;
+    o += "{\n";
+    o += std::string("  \"alwaysOnTop\": ") + (s.alwaysOnTop ? "true" : "false") + ",\n";
+    o += "  \"opacity\": " + std::to_string(s.opacity) + ",\n";
+    o += "  \"size\": " + std::to_string(s.size) + ",\n";
+    o += std::string("  \"showSeconds\": ") + (s.showSeconds ? "true" : "false") + ",\n";
+    o += std::string("  \"startWithWindows\": ") + (s.startWithWindows ? "true" : "false") + ",\n";
+    if (s.hasPosition) {
+        o += "  \"x\": " + std::to_string(s.x) + ",\n";
+        o += "  \"y\": " + std::to_string(s.y) + ",\n";
+    }
+    o += "  \"clocks\": [\n";
+    for (int i = 0; i < 2; ++i) {
+        o += "    {\"label\": ";
+        AppendJsonString(o, WideToUtf8(s.clock[i].label));
+        o += ", \"timeZone\": ";
+        AppendJsonString(o, WideToUtf8(s.clock[i].timeZone));
+        o += "}";
+        if (i == 0) o += ",";
+        o += "\n";
+    }
+    o += "  ]\n}\n";
+    return o;
+}
+
+bool SettingsFromJson(const std::string& json, Settings& s) {
+    Parser parser(json);
+    Value root;
+    if (!parser.Parse(root)) return false;
+    Settings out = DefaultSettings();
+    if (!Apply(root, out)) return false;
+    s = std::move(out);
+    return true;
+}
+
+std::wstring SettingsPath() {
+    wchar_t buf[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, buf))) {
+        std::wstring dir = std::wstring(buf) + L"\\DualZoneClock";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        return dir + L"\\settings.json";
+    }
+    return ExeDir() + L"\\settings.json";
+}
+
+bool LoadSettings(Settings& s) {
+    std::string raw;
+    if (!ReadFileUtf8(SettingsPath(), raw)) return false;
+    return SettingsFromJson(raw, s);
+}
+
+bool SaveSettings(const Settings& s) {
+    return WriteAtomic(SettingsPath(), SettingsToJson(s));
+}
