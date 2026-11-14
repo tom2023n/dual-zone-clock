@@ -96,10 +96,12 @@ bool MakeFormat(RendererImpl& impl, float px, DWRITE_TEXT_ALIGNMENT align, ComPt
 }
 
 bool ComputeGeom(RendererImpl& impl, const Frame& frame, Geom& g) {
-    float user = frame.size == 0 ? 0.86f : frame.size == 2 ? 1.26f : 1.f;
+    float user = frame.scale / 100.f;
+    if (user < 0.5f) user = 0.5f;
+    if (user > 3.f) user = 3.f;
     float dpi = frame.dpi < 48 ? 96.f : (float)frame.dpi;
     g.scale = user * (dpi / 96.f);
-    if (g.scale < 0.6f) g.scale = 0.6f;
+    if (g.scale < 0.45f) g.scale = 0.45f;
     const float s = g.scale;
     g.shadow = 16.f * s;
     g.radius = 16.f * s;

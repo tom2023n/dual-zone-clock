@@ -248,18 +248,18 @@ void AppendJsonString(std::string& out, const std::string& utf8) {
     out.push_back('"');
 }
 
-int SnapOpacity(int v) {
-    const int opts[] = {40, 55, 70, 85, 100};
-    int best = 85;
-    int bestD = 1000;
-    for (int o : opts) {
-        int d = std::abs(v - o);
-        if (d < bestD) {
-            bestD = d;
-            best = o;
-        }
-    }
-    return best;
+int ClampInt(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+// Older builds stored size as a preset index: 0 small, 1 standard, 2 large.
+int ScaleFromPreset(int preset) {
+    if (preset <= 0) return 86;
+    if (preset == 1) return 100;
+    if (preset == 2) return 126;
+    return ClampInt(preset, kScaleMin, kScaleMax);
 }
 
 bool Apply(const Value& root, Settings& s) {
@@ -268,14 +268,18 @@ bool Apply(const Value& root, Settings& s) {
         if (v->type == Value::BOOL) s.alwaysOnTop = v->b;
     }
     if (const Value* v = root.field("opacity")) {
-        if (v->type == Value::NUM) s.opacity = SnapOpacity((int)std::lround(v->num));
+        if (v->type == Value::NUM) s.opacity = ClampInt((int)std::lround(v->num), kOpacityMin, kOpacityMax);
     }
-    if (const Value* v = root.field("size")) {
+    bool sawScale = false;
+    if (const Value* v = root.field("scale")) {
         if (v->type == Value::NUM) {
-            int n = (int)std::lround(v->num);
-            if (n < 0) n = 0;
-            if (n > 2) n = 2;
-            s.size = n;
+            s.scale = ClampInt((int)std::lround(v->num), kScaleMin, kScaleMax);
+            sawScale = true;
+        }
+    }
+    if (!sawScale) {
+        if (const Value* v = root.field("size")) {
+            if (v->type == Value::NUM) s.scale = ScaleFromPreset((int)std::lround(v->num));
         }
     }
     if (const Value* v = root.field("showSeconds")) {
@@ -381,7 +385,7 @@ Settings DefaultSettings() {
     s.clock[0] = {L"都柏林", L"GMT Standard Time"};
     s.clock[1] = {L"北京", L"China Standard Time"};
     s.opacity = 85;
-    s.size = 1;
+    s.scale = 100;
     s.showSeconds = true;
     s.alwaysOnTop = false;
     s.startWithWindows = false;
@@ -394,7 +398,7 @@ std::string SettingsToJson(const Settings& s) {
     o += "{\n";
     o += std::string("  \"alwaysOnTop\": ") + (s.alwaysOnTop ? "true" : "false") + ",\n";
     o += "  \"opacity\": " + std::to_string(s.opacity) + ",\n";
-    o += "  \"size\": " + std::to_string(s.size) + ",\n";
+    o += "  \"scale\": " + std::to_string(s.scale) + ",\n";
     o += std::string("  \"showSeconds\": ") + (s.showSeconds ? "true" : "false") + ",\n";
     o += std::string("  \"startWithWindows\": ") + (s.startWithWindows ? "true" : "false") + ",\n";
     if (s.hasPosition) {

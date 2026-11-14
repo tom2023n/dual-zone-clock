@@ -8,7 +8,7 @@ struct Frame {
     std::wstring time[2];
     std::wstring date[2];
     int opacity = 85;
-    int size = 1;
+    int scale = 100;
     UINT dpi = 96;
     bool hovered = false;
 };

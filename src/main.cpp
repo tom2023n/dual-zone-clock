@@ -15,6 +15,7 @@ namespace {
 constexpr wchar_t kClass[] = L"DualZoneClockWidget";
 constexpr wchar_t kLabelClass[] = L"DualZoneLabelDialog";
 constexpr wchar_t kZoneClass[] = L"DualZoneZoneDialog";
+constexpr wchar_t kLookClass[] = L"DualZoneLookDialog";
 
 constexpr UINT WM_NUDGE = WM_APP + 1;
 constexpr UINT WM_TRAY = WM_APP + 2;
@@ -29,9 +30,7 @@ constexpr int ID_SECONDS = 1012;
 constexpr int ID_STARTUP = 1013;
 constexpr int ID_RESET = 1014;
 constexpr int ID_EXIT = 1015;
-constexpr int ID_OP_BASE = 1100;
-constexpr int ID_SIZE_BASE = 1200;
-constexpr int kOpacity[] = {40, 55, 70, 85, 100};
+constexpr int ID_LOOK = 1016;
 
 constexpr int IDC_EDIT = 2001;
 constexpr int IDC_LIST = 2002;
@@ -252,7 +251,7 @@ Frame MakeFrame() {
         f.date[i] = g_shown[i].date;
     }
     f.opacity = g_settings.opacity;
-    f.size = g_settings.size;
+    f.scale = g_settings.scale;
     f.dpi = g_dpi;
     f.hovered = g_hovered;
     return f;
@@ -395,11 +394,7 @@ HMENU BuildMenu(HBRUSH* background) {
     static MenuItem startup{L"开机启动", false};
     static MenuItem reset{L"重置位置", false};
     static MenuItem quit{L"退出", false};
-    static MenuItem opacity{L"透明度", true};
-    static MenuItem sizeItem{L"大小", true};
-    static wchar_t opText[5][8];
-    static MenuItem opItem[5];
-    static MenuItem sizeChoices[3] = {{L"小", false}, {L"标准", false}, {L"大", false}};
+    static MenuItem look{L"大小与透明度…", false};
 
     HMENU menu = CreatePopupMenu();
     HMENU m1 = CreatePopupMenu();
@@ -414,20 +409,7 @@ HMENU BuildMenu(HBRUSH* background) {
     AppendMenuW(menu, MF_OWNERDRAW | (g_settings.alwaysOnTop ? MF_CHECKED : 0), ID_TOPMOST, reinterpret_cast<LPCWSTR>(&top));
     AppendMenuW(menu, MF_OWNERDRAW | (!g_settings.alwaysOnTop ? MF_CHECKED : 0), ID_DESKTOP, reinterpret_cast<LPCWSTR>(&desk));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-
-    HMENU op = CreatePopupMenu();
-    for (int i = 0; i < 5; ++i) {
-        Fmt(opText[i], L"%d%%", kOpacity[i]);
-        opItem[i] = {opText[i], false};
-        AppendMenuW(op, MF_OWNERDRAW | (g_settings.opacity == kOpacity[i] ? MF_CHECKED : 0), ID_OP_BASE + i, reinterpret_cast<LPCWSTR>(&opItem[i]));
-    }
-    AppendMenuW(menu, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)op, reinterpret_cast<LPCWSTR>(&opacity));
-
-    HMENU sz = CreatePopupMenu();
-    for (int i = 0; i < 3; ++i) {
-        AppendMenuW(sz, MF_OWNERDRAW | (g_settings.size == i ? MF_CHECKED : 0), ID_SIZE_BASE + i, reinterpret_cast<LPCWSTR>(&sizeChoices[i]));
-    }
-    AppendMenuW(menu, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)sz, reinterpret_cast<LPCWSTR>(&sizeItem));
+    AppendMenuW(menu, MF_OWNERDRAW, ID_LOOK, reinterpret_cast<LPCWSTR>(&look));
     AppendMenuW(menu, MF_OWNERDRAW | (g_settings.showSeconds ? MF_CHECKED : 0), ID_SECONDS, reinterpret_cast<LPCWSTR>(&seconds));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_OWNERDRAW | (g_settings.startWithWindows ? MF_CHECKED : 0), ID_STARTUP, reinterpret_cast<LPCWSTR>(&startup));
@@ -502,7 +484,23 @@ void PlaceDialog(HWND owner, int clientW, int clientH, DWORD style, DWORD ex, in
     GetWindowRect(owner, &wr);
     x = (wr.left + wr.right) / 2 - w / 2;
     y = (wr.top + wr.bottom) / 2 - h / 2;
-    ClampVisible(x, y, w, h);
+    POINT pt{x + w / 2, y + h / 2};
+    HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (GetMonitorInfoW(mon, &mi)) {
+        RECT wa = mi.rcWork;
+        if (w >= wa.right - wa.left) x = wa.left;
+        else {
+            if (x < wa.left + 8) x = wa.left + 8;
+            if (x + w > wa.right - 8) x = wa.right - w - 8;
+        }
+        if (h >= wa.bottom - wa.top) y = wa.top;
+        else {
+            if (y < wa.top + 8) y = wa.top + 8;
+            if (y + h > wa.bottom - 8) y = wa.bottom - h - 8;
+        }
+    }
 }
 
 void UseDarkTitle(HWND hwnd) {
@@ -795,6 +793,138 @@ void ChangeZone(int index) {
     ApplyZOrder();
 }
 
+struct LookState {
+    HWND scaleBar = nullptr;
+    HWND opacityBar = nullptr;
+    HWND scaleValue = nullptr;
+    HWND opacityValue = nullptr;
+    HFONT font = nullptr;
+    bool dirty = false;
+};
+
+void SetPercentText(HWND label, int value) {
+    wchar_t buf[16];
+    Fmt(buf, L"%d%%", value);
+    SetWindowTextW(label, buf);
+}
+
+void ApplyLookValue(LookState* st, HWND bar) {
+    int pos = (int)SendMessageW(bar, TBM_GETPOS, 0, 0);
+    if (bar == st->scaleBar) {
+        if (pos < kScaleMin) pos = kScaleMin;
+        if (pos > kScaleMax) pos = kScaleMax;
+        if (pos == g_settings.scale) return;
+        g_settings.scale = pos;
+        SetPercentText(st->scaleValue, pos);
+        Refresh(true, true);
+        st->dirty = true;
+    } else if (bar == st->opacityBar) {
+        if (pos < kOpacityMin) pos = kOpacityMin;
+        if (pos > kOpacityMax) pos = kOpacityMax;
+        if (pos == g_settings.opacity) return;
+        g_settings.opacity = pos;
+        SetPercentText(st->opacityValue, pos);
+        Refresh(true, false);
+        st->dirty = true;
+    }
+}
+
+LRESULT CALLBACK LookProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* st = reinterpret_cast<LookState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_CREATE: {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+        st = reinterpret_cast<LookState*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)st);
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        int pad = Scale(18);
+        int labelH = Scale(22);
+        int barH = Scale(34);
+        int valueW = Scale(72);
+        int y = pad;
+        CreateWindowExW(0, L"STATIC", L"大小", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX | SS_CENTERIMAGE,
+                        pad, y, Scale(160), labelH, hwnd, nullptr, g_inst, nullptr);
+        st->scaleValue = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_NOPREFIX | SS_CENTERIMAGE,
+                                          rc.right - pad - valueW, y, valueW, labelH, hwnd, nullptr, g_inst, nullptr);
+        y += labelH + Scale(2);
+        st->scaleBar = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
+                                        pad, y, rc.right - pad * 2, barH, hwnd, nullptr, g_inst, nullptr);
+        SendMessageW(st->scaleBar, TBM_SETRANGEMIN, FALSE, kScaleMin);
+        SendMessageW(st->scaleBar, TBM_SETRANGEMAX, FALSE, kScaleMax);
+        SendMessageW(st->scaleBar, TBM_SETLINESIZE, 0, 1);
+        SendMessageW(st->scaleBar, TBM_SETPAGESIZE, 0, 10);
+        SendMessageW(st->scaleBar, TBM_SETPOS, TRUE, g_settings.scale);
+        SetPercentText(st->scaleValue, g_settings.scale);
+
+        y += barH + Scale(16);
+        CreateWindowExW(0, L"STATIC", L"透明度", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX | SS_CENTERIMAGE,
+                        pad, y, Scale(160), labelH, hwnd, nullptr, g_inst, nullptr);
+        st->opacityValue = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_NOPREFIX | SS_CENTERIMAGE,
+                                            rc.right - pad - valueW, y, valueW, labelH, hwnd, nullptr, g_inst, nullptr);
+        y += labelH + Scale(2);
+        st->opacityBar = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
+                                          pad, y, rc.right - pad * 2, barH, hwnd, nullptr, g_inst, nullptr);
+        SendMessageW(st->opacityBar, TBM_SETRANGEMIN, FALSE, kOpacityMin);
+        SendMessageW(st->opacityBar, TBM_SETRANGEMAX, FALSE, kOpacityMax);
+        SendMessageW(st->opacityBar, TBM_SETLINESIZE, 0, 1);
+        SendMessageW(st->opacityBar, TBM_SETPAGESIZE, 0, 5);
+        SendMessageW(st->opacityBar, TBM_SETPOS, TRUE, g_settings.opacity);
+        SetPercentText(st->opacityValue, g_settings.opacity);
+
+        int btnW = Scale(88);
+        int btnH = Scale(30);
+        CreateWindowExW(0, L"BUTTON", L"关闭", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                        rc.right - pad - btnW, rc.bottom - pad - btnH, btnW, btnH, hwnd, (HMENU)IDOK, g_inst, nullptr);
+        st->font = CreateFontW(-MulDiv(9, (int)g_dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                               g_renderer.UiFace().c_str());
+        ApplyChildFont(hwnd, st->font);
+        return 0;
+    }
+    case WM_HSCROLL:
+        if (st && lp) {
+            ApplyLookValue(st, (HWND)lp);
+            if (LOWORD(wp) == TB_ENDTRACK && st->dirty) SaveSettings(g_settings);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (st && st->dirty) SaveSettings(g_settings);
+        if (st && st->font) {
+            DeleteObject(st->font);
+            st->font = nullptr;
+        }
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void EditLook() {
+    LookState st;
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+    DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_DLGMODALFRAME;
+    int x, y, w, h;
+    PlaceDialog(g_hwnd, Scale(440), Scale(208), style, ex, x, y, w, h);
+    HWND dlg = CreateWindowExW(ex, kLookClass, L"大小与透明度", style, x, y, w, h, nullptr, nullptr, g_inst, &st);
+    if (!dlg) return;
+    UseDarkTitle(dlg);
+    g_dialogOpen = true;
+    PumpModal(dlg);
+    g_dialogOpen = false;
+    ApplyZOrder();
+}
+
 void ExitApp() {
     g_exiting = true;
     SaveSettings(g_settings);
@@ -814,15 +944,8 @@ void OnCommand(int id) {
         g_settings.alwaysOnTop = false;
         ApplyZOrder();
         SaveSettings(g_settings);
-    } else if (id >= ID_OP_BASE && id < ID_OP_BASE + 5) {
-        g_settings.opacity = kOpacity[id - ID_OP_BASE];
-        SaveSettings(g_settings);
-        Refresh(true, false);
-    } else if (id >= ID_SIZE_BASE && id < ID_SIZE_BASE + 3) {
-        g_settings.size = id - ID_SIZE_BASE;
-        DropUiFont();
-        SaveSettings(g_settings);
-        Refresh(true, true);
+    } else if (id == ID_LOOK) {
+        EditLook();
     } else if (id == ID_SECONDS) {
         g_settings.showSeconds = !g_settings.showSeconds;
         SaveSettings(g_settings);
@@ -1018,6 +1141,9 @@ bool RegisterClasses() {
     if (!RegisterClassExW(&dlg)) return false;
     dlg.lpfnWndProc = ZoneProc;
     dlg.lpszClassName = kZoneClass;
+    if (!RegisterClassExW(&dlg)) return false;
+    dlg.lpfnWndProc = LookProc;
+    dlg.lpszClassName = kLookClass;
     return RegisterClassExW(&dlg) != 0;
 }
 
@@ -1046,8 +1172,8 @@ int RunSelfTest(const wchar_t* outPath) {
     s.hasPosition = true;
     s.x = -40;
     s.y = 80;
-    s.opacity = 55;
-    s.size = 2;
+    s.opacity = 37;
+    s.scale = 180;
     s.alwaysOnTop = true;
     s.showSeconds = false;
     s.startWithWindows = true;
@@ -1060,7 +1186,15 @@ int RunSelfTest(const wchar_t* outPath) {
     expect(parsed && back.clock[0].label == s.clock[0].label, "json_label_escape");
     expect(parsed && back.clock[1].timeZone == L"China Standard Time", "json_zone");
     expect(parsed && back.x == -40 && back.y == 80 && back.hasPosition, "json_pos");
-    expect(parsed && back.opacity == 55 && back.size == 2 && back.alwaysOnTop && !back.showSeconds && back.startWithWindows, "json_flags");
+    expect(parsed && back.opacity == 37 && back.scale == 180 && back.alwaysOnTop && !back.showSeconds && back.startWithWindows, "json_flags");
+
+    Settings migrated;
+    expect(SettingsFromJson("{\"size\":0,\"opacity\":40}", migrated) && migrated.scale == 86 && migrated.opacity == 40, "migrate_small");
+    expect(SettingsFromJson("{\"size\":1,\"opacity\":85}", migrated) && migrated.scale == 100 && migrated.opacity == 85, "migrate_medium");
+    expect(SettingsFromJson("{\"size\":2,\"opacity\":100}", migrated) && migrated.scale == 126 && migrated.opacity == 100, "migrate_large");
+    expect(SettingsFromJson("{\"scale\":175,\"size\":0,\"opacity\":23}", migrated) && migrated.scale == 175 && migrated.opacity == 23, "scale_wins");
+    expect(SettingsFromJson("{\"scale\":10,\"opacity\":5}", migrated) && migrated.scale == kScaleMin && migrated.opacity == kOpacityMin, "clamp_low");
+    expect(SettingsFromJson("{\"scale\":400,\"opacity\":140}", migrated) && migrated.scale == kScaleMax && migrated.opacity == kOpacityMax, "clamp_high");
 
     expect(FormatOffset(0) == L"UTC+0", "offset_zero");
     expect(FormatOffset(480) == L"UTC+8", "offset_china");
@@ -1141,7 +1275,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     }
 
     HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES};
+    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES | ICC_BAR_CLASSES};
     InitCommonControlsEx(&icc);
 
     g_settings = DefaultSettings();
