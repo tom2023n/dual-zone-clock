@@ -83,6 +83,10 @@ int g_weatherLeft = 0;
 bool g_weatherBusy = false;
 bool g_weatherGotOne = false;
 unsigned long long g_weatherStamp = 0;
+int g_revealTick = 0;
+int g_revealStable = 0;
+int g_revealAttempts = 0;
+bool g_revealDone = false;
 bool g_inZOrder = false;
 POINT g_dragPt{};
 int g_dragX = 0;
@@ -262,6 +266,35 @@ void AddTray() {
     UpdateTip();
 }
 
+bool DesktopReady() {
+    if (GetSystemMetrics(SM_CXSCREEN) < 640 || GetSystemMetrics(SM_CYSCREEN) < 480) return false;
+    RECT wa{};
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) return false;
+    if (wa.right - wa.left < 320 || wa.bottom - wa.top < 240) return false;
+    return FindWindowW(L"Progman", nullptr) != nullptr;
+}
+
+void ApplyZOrder();
+void Refresh(bool force, bool anchorCenter);
+
+// Logon starts Run-key programs with SW_SHOWMINNOACTIVE before the desktop
+// has finished composing. UpdateLayeredWindow then paints a window that DWM
+// never shows. ShowWindow is what a tray click does; call it explicitly, and
+// again once Explorer sends TaskbarCreated.
+void RevealWidget() {
+    if (!g_hwnd || g_exiting) return;
+    if (DesktopReady() && g_w > 0 && g_h > 0) {
+        int x = g_settings.x;
+        int y = g_settings.y;
+        ClampVisible(x, y, g_w, g_h);
+        g_settings.x = x;
+        g_settings.y = y;
+    }
+    ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
+    Refresh(true, false);
+    ApplyZOrder();
+}
+
 void ApplyZOrder() {
     if (!g_hwnd || g_inZOrder || g_exiting) return;
     g_inZOrder = true;
@@ -350,14 +383,11 @@ void Refresh(bool force, bool anchorCenter) {
 
 void Nudge() {
     if (!g_hwnd) return;
-    ShowWindow(g_hwnd, SW_SHOW);
     RECT r{};
     GetWindowRect(g_hwnd, &r);
-    if (!MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) {
-        g_settings.hasPosition = false;
-        Refresh(true, false);
-        SaveSettings(g_settings);
-    }
+    if (!MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) g_settings.hasPosition = false;
+    RevealWidget();
+    SaveSettings(g_settings);
 }
 
 void DrawCheck(HDC dc, int x, int y, COLORREF color) {
@@ -1627,7 +1657,10 @@ void OnCommand(int id) {
 LRESULT CALLBACK WidgetProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (g_taskbarCreated && msg == g_taskbarCreated) {
         AddTray();
-        ApplyZOrder();
+        g_revealDone = false;
+        g_revealStable = 0;
+        g_revealAttempts = 0;
+        RevealWidget();
         return 0;
     }
     switch (msg) {
@@ -1753,7 +1786,19 @@ LRESULT CALLBACK WidgetProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 unsigned long long now = GetTickCount64();
                 if (g_weatherStamp == 0 || now - g_weatherStamp > 20ull * 60ull * 1000ull) RequestWeather();
             }
-            if (!g_settings.alwaysOnTop && !g_dragging && !g_menuOpen && !g_dialogOpen) {
+            if (!g_revealDone && !g_dragging && !g_menuOpen && !g_dialogOpen) {
+                if (++g_revealTick >= 10) {
+                    g_revealTick = 0;
+                    ++g_revealAttempts;
+                    RevealWidget();
+                    if (DesktopReady() && IsWindowVisible(g_hwnd)) ++g_revealStable;
+                    else g_revealStable = 0;
+                    if (g_revealStable >= 3 || g_revealAttempts >= 30) {
+                        g_revealDone = true;
+                        SaveSettings(g_settings);
+                    }
+                }
+            } else if (g_revealDone && !g_settings.alwaysOnTop && !g_dragging && !g_menuOpen && !g_dialogOpen) {
                 if (++g_zTick >= 30) {
                     g_zTick = 0;
                     ApplyZOrder();
@@ -2061,8 +2106,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
 
     g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     AddTray();
-    Refresh(true, false);
-    ApplyZOrder();
+    RevealWidget();
     SaveSettings(g_settings);
     g_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, OnForeground, 0, 0,
                              WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);

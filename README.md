@@ -20,7 +20,7 @@ Dual Zone Clock is a small borderless desktop widget for Windows 11. It shows tw
 
 ## 下载
 
-从 [Releases](https://github.com/tom2023n/dual-zone-clock/releases) 下载 **v1.0.0**：
+从 [Releases](https://github.com/tom2023n/dual-zone-clock/releases) 下载 **v1.0.1**：
 
 - `DualZoneClock-win64.zip`：压缩包，里面是 exe 和这份说明
 - `DualZoneClock.exe`：直接双击运行

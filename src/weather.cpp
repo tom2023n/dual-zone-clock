@@ -88,9 +88,9 @@ std::string EncodeQuery(const std::wstring& text) {
 bool HttpGet(const wchar_t* host, const std::wstring& path, std::string& body) {
     body.clear();
     Inet session;
-    session.h = WinHttpOpen(L"DualZoneClock/1.0.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    session.h = WinHttpOpen(L"DualZoneClock/1.0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session.h) {
-        session.h = WinHttpOpen(L"DualZoneClock/1.0.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        session.h = WinHttpOpen(L"DualZoneClock/1.0.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     }
     if (!session.h) return false;
     WinHttpSetTimeouts(session.h, 4000, 4000, 8000, 8000);
